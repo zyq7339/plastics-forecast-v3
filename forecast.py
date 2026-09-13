@@ -2,7 +2,7 @@
 """
 塑料颗粒AI预测 - 全自动工作流（最终稳定版）
 支持 daily / weekly / monthly 三种模式
-优先使用 DeepSeek Responses API 的 web_search；若未触发，自动降级到 Tavily 搜索。
+所有敏感信息从环境变量读取，不硬编码
 """
 
 import requests
@@ -10,16 +10,15 @@ import json
 import re
 import time
 import sys
+import os
 from datetime import datetime, timedelta
 
 # ================================================
-# ✅ 配置区（按需修改）
+# ✅ 配置区：全部从环境变量读取
 # ================================================
-DEEPSEEK_API_KEY = "sk-14c6dac8097144c5a6fdcf7bd43e6123"
-FEISHU_WEBHOOK_URL = "https://open.feishu.cn/open-apis/bot/v2/hook/35913b97-f013-40d5-be75-65a5d64e2c06"
-
-# 如果 DeepSeek 搜索失败，会调用 Tavily（免费注册获取 key：https://tavily.com）
-TAVILY_API_KEY = ""   # 建议填写；留空则仅尝试 DeepSeek
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+FEISHU_WEBHOOK_URL = os.environ.get("FEISHU_WEBHOOK_URL", "")
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")   # 可选
 
 # 多维表格已关闭
 TABLE_ID_DAILY = None
@@ -38,13 +37,12 @@ def get_target_date(mode="daily"):
     today = datetime.now()
     if mode == "daily":
         weekday = today.weekday()
-        delta = 3 if weekday == 4 else 1   # 周五预测下周一
+        delta = 3 if weekday == 4 else 1
         return today + timedelta(days=delta)
     return today
 
 
 def extract_output_text(result):
-    """从 Responses API 的 output 中提取文本"""
     try:
         output = result.get("output", [])
         text_parts = []
@@ -60,7 +58,6 @@ def extract_output_text(result):
 
 
 def tavily_search(query):
-    """使用 Tavily 搜索（备选）"""
     if not TAVILY_API_KEY:
         return None
     try:
@@ -78,7 +75,10 @@ def tavily_search(query):
 
 
 def call_deepseek(prompt, max_retries=3):
-    """调用 DeepSeek Responses API，强制 web_search"""
+    if not DEEPSEEK_API_KEY:
+        print("❌ DEEPSEEK_API_KEY 未配置")
+        return None
+
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
@@ -87,7 +87,7 @@ def call_deepseek(prompt, max_retries=3):
         "model": DEEPSEEK_MODEL,
         "input": prompt,
         "tools": [{"type": "web_search"}],
-        "tool_choice": {"type": "web_search"},   # 强制搜索
+        "tool_choice": {"type": "web_search"},
         "temperature": 0.3,
         "stream": False
     }
@@ -123,7 +123,7 @@ def call_deepseek(prompt, max_retries=3):
         if attempt < max_retries - 1:
             time.sleep(5 * (attempt + 1))
 
-    # 如果 DeepSeek 搜索未触发，尝试 Tavily 备选
+    # Tavily 备选
     if TAVILY_API_KEY:
         print("🔄 DeepSeek 搜索未成功，尝试 Tavily 备选...")
         search_result = tavily_search(prompt[:500])
@@ -151,6 +151,9 @@ def call_deepseek(prompt, max_retries=3):
 
 
 def send_to_feishu(content):
+    if not FEISHU_WEBHOOK_URL:
+        print("❌ FEISHU_WEBHOOK_URL 未配置")
+        return False
     if len(content) > 4000:
         content = content[:3900] + "\n\n... (截断)"
     try:
