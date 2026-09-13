@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-塑料颗粒AI预测 - 全自动工作流（Tavily优先版）
-支持 daily / weekly / monthly 三种模式
-优先使用 Tavily 搜索实时数据，再由 DeepSeek 分析生成报告。
-所有敏感信息从环境变量读取。
+塑料颗粒AI预测 - 全自动工作流（DeepSeek原生搜索版）
+使用 Responses API + web_search，无需第三方搜索API
 """
 
 import requests
@@ -19,7 +17,6 @@ from datetime import datetime, timedelta
 # ================================================
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 FEISHU_WEBHOOK_URL = os.environ.get("FEISHU_WEBHOOK_URL", "")
-TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")   # 必填，去 tavily.com 免费注册
 
 TABLE_ID_DAILY = None
 TABLE_ID_WEEKLY = None
@@ -57,113 +54,12 @@ def extract_output_text(result):
         return None
 
 
-def tavily_search(query, max_results=8):
-    """使用 Tavily 搜索"""
-    if not TAVILY_API_KEY:
-        print("⚠️ TAVILY_API_KEY 未配置，跳过 Tavily 搜索")
+def call_deepseek(prompt, max_retries=3):
+    """调用 DeepSeek Responses API，强制启用服务端 web_search"""
+    if not DEEPSEEK_API_KEY:
+        print("❌ DEEPSEEK_API_KEY 未配置")
         return None
-    try:
-        print(f"🔍 Tavily 搜索: {query[:60]}...")
-        resp = requests.post(
-            "https://api.tavily.com/search",
-            json={
-                "api_key": TAVILY_API_KEY,
-                "query": query,
-                "search_depth": "advanced",
-                "max_results": max_results,
-                "include_answer": False
-            },
-            timeout=30
-        )
-        if resp.status_code == 200:
-            results = resp.json().get("results", [])
-            if results:
-                text = "\n".join([f"- {r['title']}: {r['content']}" for r in results])
-                print(f"✅ Tavily 返回 {len(results)} 条结果")
-                return text
-        else:
-            print(f"⚠️ Tavily HTTP {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        print(f"⚠️ Tavily 异常: {e}")
-    return None
 
-
-def call_deepseek_with_search(prompt, max_retries=3):
-    """
-    优先用 Tavily 搜索，将结果拼入 prompt，再调用 DeepSeek 分析。
-    如果 Tavily 未配置，则尝试 DeepSeek 自带的 web_search。
-    """
-    # ---------- 优先 Tavily ----------
-    if TAVILY_API_KEY:
-        # 构造搜索查询：覆盖主要品种和关键指标
-        queries = [
-            "华东 中安7042 价格 最近交易日 隆众资讯",
-            "华东 中安T03S 价格 最近交易日 隆众资讯",
-            "华东 中安7050H 价格 最近交易日 隆众资讯",
-            "华东 中安K8003 价格 最近交易日 隆众资讯",
-            "华东 中韩35H 价格 最近交易日 隆众资讯",
-            "布伦特原油期货 最近交易日 收盘价",
-            "PP期货主力合约 最近交易日 收盘价",
-            "PE期货主力合约 最近交易日 收盘价",
-            "宝丰7042 华东 价格 最近交易日",
-            "华东 塑料 库存 最近交易日"
-        ]
-        search_texts = []
-        for q in queries:
-            t = tavily_search(q, max_results=3)
-            if t:
-                search_texts.append(f"【{q}】\n{t}")
-        
-        if search_texts:
-            combined_search = "\n\n".join(search_texts)
-            # 将搜索结果作为上下文，拼接到 prompt
-            augmented_prompt = (
-                f"{prompt}\n\n"
-                f"【以下为 Tavily 搜索到的最近交易日实时数据，请基于这些数据进行分析】\n"
-                f"{combined_search}\n\n"
-                f"请根据以上数据，按原格式生成预测报告。"
-            )
-            print(f"✅ 已将 Tavily 搜索结果拼入 prompt（共 {len(combined_search)} 字符）")
-            return call_deepseek_plain(augmented_prompt, max_retries)
-        else:
-            print("⚠️ Tavily 未返回有效结果，尝试 DeepSeek web_search")
-
-    # ---------- 备选：DeepSeek web_search ----------
-    return call_deepseek_websearch(prompt, max_retries)
-
-
-def call_deepseek_plain(prompt, max_retries=3):
-    """普通 DeepSeek 调用（不带 web_search）"""
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
-    }
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "input": prompt,
-        "temperature": 0.3,
-        "stream": False
-    }
-    for attempt in range(max_retries):
-        try:
-            print(f"🔄 调用 DeepSeek（无搜索，尝试 {attempt+1}/{max_retries}）...")
-            resp = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=180)
-            if resp.status_code == 200:
-                text = extract_output_text(resp.json())
-                if text:
-                    print(f"✅ 成功，报告长度: {len(text)} 字符")
-                    return text
-            else:
-                print(f"⚠️ HTTP {resp.status_code}: {resp.text[:300]}")
-        except Exception as e:
-            print(f"⚠️ 异常: {e}")
-        if attempt < max_retries - 1:
-            time.sleep(5 * (attempt + 1))
-    return None
-
-
-def call_deepseek_websearch(prompt, max_retries=3):
-    """DeepSeek 自带 web_search（备选）"""
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
@@ -172,28 +68,49 @@ def call_deepseek_websearch(prompt, max_retries=3):
         "model": DEEPSEEK_MODEL,
         "input": prompt,
         "tools": [{"type": "web_search"}],
-        "tool_choice": {"type": "web_search"},
+        "tool_choice": {"type": "web_search"},   # 强制搜索，不可省略
         "temperature": 0.3,
         "stream": False
     }
+
     for attempt in range(max_retries):
         try:
-            print(f"🔄 调用 DeepSeek web_search（尝试 {attempt+1}/{max_retries}）...")
+            print(f"🔄 调用 Responses API（尝试 {attempt+1}/{max_retries}）...")
             resp = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=180)
+
             if resp.status_code == 200:
                 result = resp.json()
-                has_search = any(item.get("type") == "web_search_call" for item in result.get("output", []))
+                has_search = any(
+                    item.get("type") == "web_search_call"
+                    for item in result.get("output", [])
+                )
                 print(f"🔍 搜索调用检测: {'✅ 已调用' if has_search else '❌ 未调用'}")
+
+                if has_search:
+                    for item in result.get("output", []):
+                        if item.get("type") == "web_search_call":
+                            action = item.get("action", {})
+                            if action.get("queries"):
+                                print(f"  📝 搜索词: {action['queries']}")
+
                 text = extract_output_text(result)
                 if text:
                     print(f"✅ 成功，报告长度: {len(text)} 字符")
                     return text
+                else:
+                    print("⚠️ 响应中无 output_text")
             else:
-                print(f"⚠️ HTTP {resp.status_code}: {resp.text[:300]}")
+                print(f"⚠️ HTTP {resp.status_code}: {resp.text[:500]}")
+
+        except requests.exceptions.Timeout:
+            print(f"⏰ 超时（尝试 {attempt+1}/{max_retries}）")
         except Exception as e:
             print(f"⚠️ 异常: {e}")
+
         if attempt < max_retries - 1:
             time.sleep(5 * (attempt + 1))
+
+    print("❌ API 调用失败")
     return None
 
 
@@ -308,7 +225,7 @@ PE期货（主力）：XX元/吨
 中韩35H → ★★★
 
 ========================================
-数据来源：Tavily 联网搜索最近交易日数据
+数据来源：DeepSeek 原生联网搜索最近交易日数据
 免责声明：仅供参考，实际交易请结合自身情况决策
 ========================================
 """
@@ -317,7 +234,7 @@ PE期货（主力）：XX元/吨
 def run_daily():
     target = get_target_date("daily")
     print(f"\n📅 预测目标: {target.strftime('%Y年%m月%d日')}")
-    report = call_deepseek_with_search(get_daily_prompt())
+    report = call_deepseek(get_daily_prompt())
     if report:
         send_to_feishu(report)
 
@@ -362,7 +279,7 @@ def get_weekly_prompt():
 
 def run_weekly():
     print("\n📅 预测目标: 本周")
-    report = call_deepseek_with_search(get_weekly_prompt())
+    report = call_deepseek(get_weekly_prompt())
     if report:
         send_to_feishu(report)
 
@@ -407,7 +324,7 @@ def get_monthly_prompt():
 
 def run_monthly():
     print("\n📅 预测目标: 本月")
-    report = call_deepseek_with_search(get_monthly_prompt())
+    report = call_deepseek(get_monthly_prompt())
     if report:
         send_to_feishu(report)
 
@@ -418,7 +335,7 @@ def run_monthly():
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "daily"
     print("=" * 50)
-    print(f"📊 塑料颗粒AI预测系统（Tavily优先版）")
+    print(f"📊 塑料颗粒AI预测系统（DeepSeek原生搜索版）")
     print(f"⏰ 启动: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📌 模式: {mode}")
     print("=" * 50)
