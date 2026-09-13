@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-塑料颗粒AI预测 - 全自动工作流（DeepSeek原生搜索版）
-使用 Responses API + web_search，无需第三方搜索API
+塑料颗粒AI预测 - 全自动工作流（博查搜索版）
+博查负责搜索实时数据，DeepSeek负责分析生成报告。
+所有敏感信息从环境变量读取。
 """
 
 import requests
@@ -17,14 +18,16 @@ from datetime import datetime, timedelta
 # ================================================
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 FEISHU_WEBHOOK_URL = os.environ.get("FEISHU_WEBHOOK_URL", "")
+BOCHA_API_KEY = os.environ.get("BOCHA_API_KEY", "")
 
 TABLE_ID_DAILY = None
 TABLE_ID_WEEKLY = None
 TABLE_ID_MONTHLY = None
 # ================================================
 
-DEEPSEEK_API_URL = "https://api.deepseek.com/responses"
-DEEPSEEK_MODEL = "deepseek-v4-flash"
+DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
+DEEPSEEK_MODEL = "deepseek-flash"
+BOCHA_API_URL = "https://api.bocha.cn/v1/web-search"
 
 
 # ================================================
@@ -39,23 +42,43 @@ def get_target_date(mode="daily"):
     return today
 
 
-def extract_output_text(result):
-    try:
-        output = result.get("output", [])
-        text_parts = []
-        for item in output:
-            if item.get("type") == "message":
-                for content in item.get("content", []):
-                    if content.get("type") == "output_text":
-                        text_parts.append(content.get("text", ""))
-        return "\n".join(text_parts) if text_parts else None
-    except Exception as e:
-        print(f"⚠️ 解析异常: {e}")
+def bocha_search(query, count=5, freshness="oneWeek"):
+    """用博查Web Search API搜索，返回清洗后的文本"""
+    if not BOCHA_API_KEY:
+        print("⚠️ BOCHA_API_KEY 未配置")
         return None
+    try:
+        resp = requests.post(
+            BOCHA_API_URL,
+            headers={
+                "Authorization": f"Bearer {BOCHA_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "query": query,
+                "count": count,
+                "freshness": freshness,
+                "summary": True
+            },
+            timeout=30
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            pages = data.get("data", {}).get("webPages", {}).get("value", [])
+            if pages:
+                results = []
+                for p in pages:
+                    title = p.get("name", "")
+                    snippet = p.get("snippet", "")
+                    results.append(f"- {title}: {snippet}")
+                return "\n".join(results)
+    except Exception as e:
+        print(f"⚠️ 博查搜索异常: {e}")
+    return None
 
 
 def call_deepseek(prompt, max_retries=3):
-    """调用 DeepSeek Responses API，强制启用服务端 web_search"""
+    """调用 DeepSeek 分析"""
     if not DEEPSEEK_API_KEY:
         print("❌ DEEPSEEK_API_KEY 未配置")
         return None
@@ -65,53 +88,54 @@ def call_deepseek(prompt, max_retries=3):
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
     }
     payload = {
-    "model": "deepseek-flash",  # 改为官方文档中的标准名称
-    "input": prompt,
-    "tools": [{"type": "web_search"}],
-    # "tool_choice": {"type": "web_search"},  # 删除此行
-    "temperature": 0.3,
-    "stream": False
-}
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": "你是塑料颗粒市场分析专家，必须严格按照用户指定的规则输出。"},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.3,
+        "stream": False
+    }
 
     for attempt in range(max_retries):
         try:
-            print(f"🔄 调用 Responses API（尝试 {attempt+1}/{max_retries}）...")
+            print(f"🔄 调用 DeepSeek（尝试 {attempt+1}/{max_retries}）...")
             resp = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=180)
-
             if resp.status_code == 200:
-                result = resp.json()
-                has_search = any(
-                    item.get("type") == "web_search_call"
-                    for item in result.get("output", [])
-                )
-                print(f"🔍 搜索调用检测: {'✅ 已调用' if has_search else '❌ 未调用'}")
-
-                if has_search:
-                    for item in result.get("output", []):
-                        if item.get("type") == "web_search_call":
-                            action = item.get("action", {})
-                            if action.get("queries"):
-                                print(f"  📝 搜索词: {action['queries']}")
-
-                text = extract_output_text(result)
-                if text:
-                    print(f"✅ 成功，报告长度: {len(text)} 字符")
-                    return text
-                else:
-                    print("⚠️ 响应中无 output_text")
+                content = resp.json()["choices"][0]["message"]["content"]
+                print(f"✅ 成功，报告长度: {len(content)} 字符")
+                return content
             else:
-                print(f"⚠️ HTTP {resp.status_code}: {resp.text[:500]}")
-
-        except requests.exceptions.Timeout:
-            print(f"⏰ 超时（尝试 {attempt+1}/{max_retries}）")
+                print(f"⚠️ HTTP {resp.status_code}: {resp.text[:300]}")
         except Exception as e:
             print(f"⚠️ 异常: {e}")
-
         if attempt < max_retries - 1:
             time.sleep(5 * (attempt + 1))
-
-    print("❌ API 调用失败")
     return None
+
+
+def search_and_analyze(prompt, search_queries):
+    """先搜索，将搜索结果拼入prompt，再让DeepSeek分析"""
+    search_texts = []
+    for q in search_queries:
+        print(f"🔍 博查搜索: {q[:50]}...")
+        t = bocha_search(q)
+        if t:
+            search_texts.append(f"【{q}】\n{t}")
+
+    if search_texts:
+        combined = "\n\n".join(search_texts)
+        augmented = (
+            f"{prompt}\n\n"
+            f"【以下为博查搜索到的最近交易日实时数据，请基于这些数据进行分析】\n"
+            f"{combined}\n\n"
+            f"请根据以上数据，按原格式生成预测报告。"
+        )
+        print(f"✅ 已拼入 {len(search_texts)} 组搜索结果（共{len(combined)}字符）")
+        return call_deepseek(augmented)
+    else:
+        print("❌ 博查未返回有效结果")
+        return call_deepseek(prompt)
 
 
 def send_to_feishu(content):
@@ -140,16 +164,11 @@ def get_daily_prompt():
     target_str = target.strftime('%Y年%m月%d日')
     weekday_note = "（周五触发，自动跳过周末，预测下周一）" if today.weekday() == 4 else ""
 
-    return f"""请根据今日最新数据，生成{target_str}华东市场塑料颗粒价格预测报告。
+    return f"""请根据以下数据，生成{target_str}华东市场塑料颗粒价格预测报告。
 
 【日期说明】
 今日日期：{today_str}
 预测日期：{target_str} {weekday_note}
-
-【⚠️ 数据时效性强制要求】
-1. 所有价格必须使用最近一个交易日（周末/节假日则用前一交易日）的收盘价。
-2. 布伦特原油合理区间 95-100 美元/桶。
-3. 期货必须使用当前主力合约的最近交易日收盘价。
 
 【⚠️ 强制推算规则】
 第一步：只预测中安7042（基准）
@@ -225,7 +244,7 @@ PE期货（主力）：XX元/吨
 中韩35H → ★★★
 
 ========================================
-数据来源：DeepSeek 原生联网搜索最近交易日数据
+数据来源：博查联网搜索最近交易日数据
 免责声明：仅供参考，实际交易请结合自身情况决策
 ========================================
 """
@@ -234,7 +253,19 @@ PE期货（主力）：XX元/吨
 def run_daily():
     target = get_target_date("daily")
     print(f"\n📅 预测目标: {target.strftime('%Y年%m月%d日')}")
-    report = call_deepseek(get_daily_prompt())
+    queries = [
+        "华东 中安7042 价格 最近交易日",
+        "华东 中安T03S 价格 最近交易日",
+        "华东 中安7050H 价格 最近交易日",
+        "华东 中安K8003 价格 最近交易日",
+        "华东 中韩35H 价格 最近交易日",
+        "布伦特原油期货 最近交易日 收盘价",
+        "PP期货主力 最近交易日 收盘价",
+        "PE期货主力 最近交易日 收盘价",
+        "宝丰7042 华东 价格 最近交易日",
+        "华东 塑料 库存 最近交易日"
+    ]
+    report = search_and_analyze(get_daily_prompt(), queries)
     if report:
         send_to_feishu(report)
 
@@ -246,7 +277,7 @@ def get_weekly_prompt():
     today = datetime.now()
     ws = (today - timedelta(days=today.weekday())).strftime('%Y年%m月%d日')
     we = (today + timedelta(days=6 - today.weekday())).strftime('%Y年%m月%d日')
-    return f"""请根据本周最新数据，生成{ws}至{we}华东市场塑料颗粒行情预测报告。
+    return f"""请根据本周数据，生成{ws}至{we}华东市场塑料颗粒行情预测报告。
 
 【输出格式】
 ========================================
@@ -279,7 +310,14 @@ def get_weekly_prompt():
 
 def run_weekly():
     print("\n📅 预测目标: 本周")
-    report = call_deepseek(get_weekly_prompt())
+    queries = [
+        "华东 PP拉丝 本周价格走势",
+        "华东 PE7042 本周价格走势",
+        "布伦特原油 本周走势",
+        "PP期货 本周走势",
+        "PE期货 本周走势"
+    ]
+    report = search_and_analyze(get_weekly_prompt(), queries)
     if report:
         send_to_feishu(report)
 
@@ -290,7 +328,7 @@ def run_weekly():
 def get_monthly_prompt():
     today = datetime.now()
     month = today.strftime('%Y年%m月')
-    return f"""请根据本月最新数据，生成{month}华东市场塑料颗粒价格中枢预测报告。
+    return f"""请根据本月数据，生成{month}华东市场塑料颗粒价格中枢预测报告。
 
 【输出格式】
 ========================================
@@ -324,7 +362,14 @@ def get_monthly_prompt():
 
 def run_monthly():
     print("\n📅 预测目标: 本月")
-    report = call_deepseek(get_monthly_prompt())
+    queries = [
+        "华东 PP拉丝 本月均价",
+        "华东 PE7042 本月均价",
+        "布伦特原油 本月均价",
+        "PP新增产能 投产 计划",
+        "PE新增产能 投产 计划"
+    ]
+    report = search_and_analyze(get_monthly_prompt(), queries)
     if report:
         send_to_feishu(report)
 
@@ -335,7 +380,7 @@ def run_monthly():
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "daily"
     print("=" * 50)
-    print(f"📊 塑料颗粒AI预测系统（DeepSeek原生搜索版）")
+    print(f"📊 塑料颗粒AI预测系统（博查搜索版）")
     print(f"⏰ 启动: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📌 模式: {mode}")
     print("=" * 50)
@@ -349,7 +394,6 @@ def main():
     else:
         print(f"❌ 未知模式: {mode}")
         sys.exit(1)
-
     print("\n✅ 完成")
 
 
