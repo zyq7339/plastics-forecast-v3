@@ -65,10 +65,10 @@ def call_deepseek(prompt, max_retries=3):
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
     }
     payload = {
-    "model": "deepseek-v4-flash",
+    "model": "deepseek-flash",  # 改为官方文档中的标准名称
     "input": prompt,
-    "tools": [{"type": "web_search"}],      # 声明工具
-    "tool_choice": {"type": "web_search"},  # 强制模型必须调用该工具
+    "tools": [{"type": "web_search"}],
+    # "tool_choice": {"type": "web_search"},  # 删除此行
     "temperature": 0.3,
     "stream": False
 }
