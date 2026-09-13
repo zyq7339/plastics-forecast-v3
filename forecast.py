@@ -65,13 +65,13 @@ def call_deepseek(prompt, max_retries=3):
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
     }
     payload = {
-        "model": DEEPSEEK_MODEL,
-        "input": prompt,
-        "tools": [{"type": "web_search"}],
-        "tool_choice": {"type": "web_search"},   # 强制搜索，不可省略
-        "temperature": 0.3,
-        "stream": False
-    }
+    "model": "deepseek-v4-flash",
+    "input": prompt,
+    "tools": [{"type": "web_search"}],      # 声明工具
+    "tool_choice": {"type": "web_search"},  # 强制模型必须调用该工具
+    "temperature": 0.3,
+    "stream": False
+}
 
     for attempt in range(max_retries):
         try:
