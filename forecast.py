@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-塑料颗粒AI预测 - 全自动工作流（博查搜索版·综合优化版）
+塑料颗粒AI预测 - 全自动工作流（博查搜索版·动态日期优化版）
 博查负责搜索实时数据，DeepSeek负责分析生成报告。
 所有敏感信息从环境变量读取。
 """
@@ -34,12 +34,30 @@ BOCHA_API_URL = "https://api.bocha.cn/v1/web-search"
 # 工具函数
 # ================================================
 def get_target_date(mode="daily"):
+    """计算预测目标日期"""
     today = datetime.now()
     if mode == "daily":
         weekday = today.weekday()
         delta = 3 if weekday == 4 else 1
         return today + timedelta(days=delta)
     return today
+
+
+def get_latest_trading_day():
+    """
+    计算最近交易日（用于搜索词限定）
+    - 周一至周五：返回当天
+    - 周六：返回周五
+    - 周日：返回周五
+    """
+    today = datetime.now()
+    weekday = today.weekday()  # 0=周一, 5=周六, 6=周日
+    if weekday == 5:      # 周六
+        return today - timedelta(days=1)
+    elif weekday == 6:    # 周日
+        return today - timedelta(days=2)
+    else:
+        return today
 
 
 def bocha_search(query, count=5, freshness="oneWeek"):
@@ -162,12 +180,15 @@ def get_daily_prompt():
     today_str = today.strftime('%Y年%m月%d日')
     target = get_target_date("daily")
     target_str = target.strftime('%Y年%m月%d日')
+    latest_td = get_latest_trading_day()
+    latest_td_str = latest_td.strftime('%Y年%m月%d日')
     weekday_note = "（周五触发，自动跳过周末，预测下周一）" if today.weekday() == 4 else ""
 
     return f"""请根据以下数据，生成{target_str}华东市场塑料颗粒价格预测报告。
 
 【日期说明】
 今日日期：{today_str}
+最近交易日：{latest_td_str}
 预测日期：{target_str} {weekday_note}
 
 【⚠️ 强制推算规则】
@@ -181,7 +202,7 @@ def get_daily_prompt():
 【⚠️ T03S 现货校验】
 中安T03S的预测必须以华东市场拉丝PP的最近交易日实际成交价为基准。
 若根据公式推算的价格与现货市场价偏差超过200元/吨，以现货市场价为准。
-务必搜索“华东 拉丝PP 市场价 最近交易日”并参考。
+务必搜索"华东 拉丝PP 市场价 最近交易日"并参考。
 
 【⚠️ 期货数据校验】
 PP/PE期货价格必须来自大连商品交易所主力合约的最近交易日收盘价。
@@ -190,6 +211,10 @@ PP/PE期货价格必须来自大连商品交易所主力合约的最近交易日
 【⚠️ 原油数据校验】
 布伦特原油价格必须使用最近交易日ICE布伦特原油期货结算价。
 近期合理区间为95-110美元/桶，若搜索结果超出该区间，请重新搜索确认。
+
+【⚠️ 数据时效性强制要求】
+所有价格数据必须是{latest_td_str}或更近的数据。
+若搜索到的数据日期早于{latest_td_str}，请在报告中明确标注实际数据日期。
 
 【输出格式】
 ========================================
@@ -265,19 +290,24 @@ PE期货（主力）：XX元/吨
 
 def run_daily():
     target = get_target_date("daily")
+    latest_td = get_latest_trading_day()
+    latest_td_str = latest_td.strftime('%Y年%m月%d日')
     print(f"\n📅 预测目标: {target.strftime('%Y年%m月%d日')}")
+    print(f"📅 最近交易日: {latest_td_str}")
+
     queries = [
-        "华东 中安7042 价格 最近交易日",
-        "华东 中安T03S 市场价 最近交易日",
-        "华东 拉丝PP 市场价 最近交易日",
-        "华东 中安7050H 价格 最近交易日",
-        "华东 中安K8003 价格 最近交易日",
-        "华东 中韩35H 价格 最近交易日",
-        "布伦特原油期货 最近交易日 结算价 隆众资讯",   # 原油搜索词优化
-        "PP期货主力 最近交易日 收盘价 大连商品交易所",
-        "PE期货主力 最近交易日 收盘价 大连商品交易所",
-        "宝丰7042 华东 价格 最近交易日",
-        "华东 塑料 库存 最近交易日"
+        f"华东 中安7042 价格 {latest_td_str}",
+        f"华东 中安7042 安徽市场 价格 最近交易日",
+        f"华东 中安T03S 市场价 {latest_td_str}",
+        f"华东 拉丝PP 市场价 {latest_td_str}",
+        f"华东 中安7050H 价格 最近交易日",
+        f"华东 中安K8003 价格 最近交易日",
+        f"华东 中韩35H 价格 {latest_td_str}",
+        f"布伦特原油期货 {latest_td_str} 结算价 隆众资讯",
+        f"PP期货主力 {latest_td_str} 收盘价 大连商品交易所",
+        f"PE期货主力 {latest_td_str} 收盘价 大连商品交易所",
+        f"宝丰7042 华东 价格 {latest_td_str}",
+        f"华东 塑料 库存 {latest_td_str}"
     ]
     report = search_and_analyze(get_daily_prompt(), queries)
     if report:
@@ -394,7 +424,7 @@ def run_monthly():
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "daily"
     print("=" * 50)
-    print(f"📊 塑料颗粒AI预测系统（博查搜索版·综合优化版）")
+    print(f"📊 塑料颗粒AI预测系统（博查搜索版·动态日期优化版）")
     print(f"⏰ 启动: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📌 模式: {mode}")
     print("=" * 50)
