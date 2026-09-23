@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-塑料颗粒AI预测 - 全自动工作流（博查搜索版·混合搜索词最终版）
+塑料颗粒AI预测 - 全自动工作流（博查搜索版·盘后数据优化版）
 博查负责搜索实时数据，DeepSeek负责分析生成报告。
 所有敏感信息从环境变量读取，搜索词混合带日期和兜底词。
 """
@@ -60,8 +60,12 @@ def get_latest_trading_day():
         return today
 
 
-def bocha_search(query, count=5, freshness="oneWeek"):
-    """用博查Web Search API搜索，返回清洗后的文本"""
+def bocha_search(query, count=5, freshness="noLimit"):
+    """
+    用博查Web Search API搜索，返回清洗后的文本。
+    freshness 使用 noLimit（默认推荐），让博查算法自动优化时间范围，
+    提高当天数据的命中率。
+    """
     if not BOCHA_API_KEY:
         print("⚠️ BOCHA_API_KEY 未配置")
         return None
@@ -191,6 +195,11 @@ def get_daily_prompt():
 最近交易日：{latest_td_str}
 预测日期：{target_str} {weekday_note}
 
+【⚠️ 数据优先级规则】
+1. 优先使用{latest_td_str}或更近的数据。
+2. 若当天数据缺失，退而使用前一交易日数据，并在报告中标注"数据滞后1天，仅供参考"。
+3. 所有价格数据必须标注实际数据日期。
+
 【⚠️ 强制推算规则】
 第一步：只预测中安7042（基准）
 第二步：其他品种按公式推算，严禁独立预测！
@@ -210,10 +219,6 @@ PP/PE期货价格必须来自大连商品交易所主力合约的最近交易日
 【⚠️ 原油数据校验】
 布伦特原油价格必须使用最近交易日ICE布伦特原油期货结算价。
 近期合理区间为95-110美元/桶，若搜索结果超出该区间，请重新搜索确认。
-
-【⚠️ 数据时效性强制要求】
-所有价格数据必须是{latest_td_str}或更近的数据。
-若搜索到的数据日期早于{latest_td_str}，请在报告中明确标注实际数据日期。
 
 【输出格式】
 ========================================
@@ -313,18 +318,22 @@ def run_daily():
         f"华东 中韩35H 价格 {latest_td_str}",
         "华东 中韩35H 价格 最新",
 
-        # 原油：带日期 + 兜底
+        # 原油：带日期 + 兜底 + 盘后
         f"布伦特原油期货 {latest_td_str} 结算价",
         "布伦特原油期货 结算价 最新",
+        "布伦特原油 今日收盘价",
 
-        # PP期货：带日期 + 兜底
+        # PP期货：带日期 + 兜底 + 盘后
         f"PP期货主力 {latest_td_str} 收盘价 大连商品交易所",
         "PP主力合约 收盘价 大连商品交易所 最新",
+        "PP期货 收盘价 今日",
         "聚丙烯期货 主力 收盘价 最新",
 
-        # PE期货：带日期 + 兜底
+        # PE期货：带日期 + 兜底 + 盘后
         f"PE期货主力 {latest_td_str} 收盘价 大连商品交易所",
         "塑料期货主力 收盘价 最新",
+        "塑料期货 收盘价 今日",
+        "LLDPE期货 主力 收盘价 最新",
 
         # 宝丰：带日期 + 兜底
         f"宝丰7042 华东 送到价 {latest_td_str}",
@@ -450,7 +459,7 @@ def run_monthly():
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "daily"
     print("=" * 50)
-    print(f"📊 塑料颗粒AI预测系统（博查搜索版·混合搜索词最终版）")
+    print(f"📊 塑料颗粒AI预测系统（博查搜索版·盘后数据优化版）")
     print(f"⏰ 启动: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📌 模式: {mode}")
     print("=" * 50)
